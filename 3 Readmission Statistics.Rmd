@@ -1,0 +1,304 @@
+---
+title: "3 Readmission Dataset Statistics"
+output: html_notebook
+author: Bryan Sullivan
+---
+
+Libraries & Functions
+```{r}
+library(epitools)
+library(dplyr)
+library(psych)
+library(Epi)
+library(survival)
+
+writeFile <- function(mylist){
+  mylist <- 
+  lapply(mylist, function(x) write.table(data.frame(x), deparse(substitute(mylist)), append= T, sep=',' ))
+}
+
+calcOddsRatio <- function(df, category, readmission)
+{
+  category <- enquo(category)
+  readmission <- enquo(readmission)
+  
+  # counting No Readmission
+  raw_nr <- df %>% 
+    filter((!!readmission) == 0) %>%
+    group_by(!!category) %>% 
+    tally()
+
+  # counting Readmission
+  raw_r <- df %>% 
+    filter((!!readmission) == 1) %>%
+    group_by(!!category) %>% 
+    tally()
+  
+  if (raw_nr[[1,1]] == "Neutral" && nlevels(raw_nr[[1]]) == 3) {
+  # Build matrix for Odds Calculations
+    mymatrix <- matrix(c(raw_nr[[1,2]], raw_r[[1,2]], raw_nr[[2,2]], raw_r[[2,2]],
+                         raw_nr[[3,2]], raw_r[[3,2]]),
+                       nrow = 3, byrow = TRUE)
+    colnames(mymatrix) <- c("No_Readmission","Readmission")
+    rownames(mymatrix) <- c(raw_nr[[1,1]], raw_nr[[2,1]], raw_nr[[3,1]])
+  } else {
+    mymatrix <- matrix(c(raw_nr[[2,2]], raw_r[[2,2]], raw_nr[[1,2]], raw_r[[1,2]],
+                         raw_nr[[3,2]], raw_r[[3,2]]), 
+                       nrow = 3, byrow = TRUE)
+    colnames(mymatrix) <- c("No_Readmission","Readmission")
+    rownames(mymatrix) <- c(raw_nr[[2,1]], raw_nr[[1,1]], raw_nr[[3,1]])
+  }
+
+  if (nlevels(raw_nr[[1]]) == 4) {
+    # Build matrix for Odds Calculations
+    mymatrix <- matrix(c(raw_nr[[1,2]], raw_r[[1,2]], raw_nr[[2,2]], raw_r[[2,2]],
+                         raw_nr[[3,2]], raw_r[[3,2]], raw_nr[[4,2]], raw_r[[4,2]]),
+                       nrow = 4, byrow = TRUE)
+    colnames(mymatrix) <- c("No_Readmission","Readmission")
+    rownames(mymatrix) <- c(raw_nr[[1,1]], raw_nr[[2,1]], raw_nr[[3,1]], raw_nr[[4,1]])
+  } 
+  if (nlevels(raw_nr[[1]]) == 5) {
+    # Build matrix for Odds Calculations
+    mymatrix <- matrix(c(raw_nr[[1,2]], raw_r[[1,2]], raw_nr[[2,2]], raw_r[[2,2]],
+                         raw_nr[[3,2]], raw_r[[3,2]], raw_nr[[4,2]], raw_r[[4,2]],
+                         raw_nr[[5,2]], raw_r[[5,2]]), 
+                   nrow = 5, byrow = TRUE)
+    colnames(mymatrix) <- c("No_Readmission","Readmission")
+    rownames(mymatrix) <- c(raw_nr[[1,1]], raw_nr[[2,1]], raw_nr[[3,1]], raw_nr[[4,1]], raw_nr[[5,1]])
+  }
+
+  return(oddsratio(mymatrix))
+}
+```
+
+Import and Clean Up the Dataframe
+```{r}
+# Read dataframe for Machine Learning model
+readmission_df <- read.csv("dataset.csv")
+
+# Convert to dates
+readmission_df$DOB <- as.Date(readmission_df$DOB)
+readmission_df$admit_date <- as.Date(readmission_df$admit_date)
+readmission_df$discharge_date <- as.Date(readmission_df$discharge_date)
+readmission_df$readmission_date <- as.Date(readmission_df$readmission_date)
+
+# Filter out the N/As
+readmission_df <- readmission_df %>% filter(age != 'NA')
+readmission_df <- readmission_df %>% filter(education != 'NA')
+readmission_df <- readmission_df %>% filter(confidence != 'NA')
+readmission_df <- readmission_df %>% filter(assistance != 'NA')
+readmission_df <- readmission_df %>% filter(understanding != 'NA')
+
+# Assign a age range to patient
+# Ranges are 0–2, 3–5, 6–13, 14–18, 19–33, 34–48, 49–64, 65–78, and 79–98 years
+readmission_df$age_range <- 9
+readmission_df$age_range[readmission_df$age < 3] <- 1
+readmission_df$age_range[readmission_df$age > 2 & readmission_df$age < 6] <- 2
+readmission_df$age_range[readmission_df$age > 5 & readmission_df$age < 14] <- 3
+readmission_df$age_range[readmission_df$age > 13 & readmission_df$age < 18] <- 4
+readmission_df$age_range[readmission_df$age > 17 & readmission_df$age < 34] <- 5
+readmission_df$age_range[readmission_df$age > 33 & readmission_df$age < 49] <- 6
+readmission_df$age_range[readmission_df$age > 48 & readmission_df$age < 65] <- 7
+readmission_df$age_range[readmission_df$age > 64 & readmission_df$age < 79] <- 8
+
+# Filter out pediatric cases
+readmission_df <- filter(readmission_df, age_range > 4)
+
+# Assign a values to the survey question
+readmission_df$confidence[readmission_df$confidence == 'Medical Form Confidence: Extremely'] <- 'Confident'
+readmission_df$confidence[readmission_df$confidence == 'Medical Form Confidence: Quite A Bit'] <- 'Confident'
+readmission_df$confidence[readmission_df$confidence == 'Medical Form Confidence: Somewhat'] <- 'Neutral'
+readmission_df$confidence[readmission_df$confidence == 'Medical Form Confidence: A Little Bit'] <- 'Not Confident'
+readmission_df$confidence[readmission_df$confidence == 'Medical Form Confidence: Not At All'] <- 'Not Confident'
+
+readmission_df$assistance[readmission_df$assistance == 'Health Material Assistance: Always'] <- 'Assistance'
+readmission_df$assistance[readmission_df$assistance == 'Health Material Assistance: Often'] <- 'Assistance'
+readmission_df$assistance[readmission_df$assistance == 'Health Material Assistance: Sometimes'] <- 'Neutral'
+readmission_df$assistance[readmission_df$assistance == 'Health Material Assistance: Occasionally'] <- 'No Assistance'
+readmission_df$assistance[readmission_df$assistance == 'Health Material Assistance: Never'] <- 'No Assistance'
+
+readmission_df$understanding[readmission_df$understanding == 'Difficult Understand Info: Never'] <- 'Understanding'
+readmission_df$understanding[readmission_df$understanding == 'Difficult Understand Info: Occasionally'] <- 'Understanding'
+readmission_df$understanding[readmission_df$understanding == 'Difficult Understand Info: Sometimes'] <- 'Neutral'
+readmission_df$understanding[readmission_df$understanding == 'Difficult Understand Info: Often'] <- 'No Understanding'
+readmission_df$understanding[readmission_df$understanding == 'Difficult Understand Info: Always'] <- 'No Understanding'
+
+# Encoding the target feature as factor
+readmission_df$eight_day = factor(readmission_df$eight_day)
+readmission_df$thirty_day = factor(readmission_df$thirty_day)
+readmission_df$ninety_day = factor(readmission_df$ninety_day)
+readmission_df$education = as.factor(readmission_df$education)
+readmission_df$confidence = as.factor(readmission_df$confidence)
+readmission_df$assistance = as.factor(readmission_df$assistance)
+readmission_df$understanding = as.factor(readmission_df$understanding)
+readmission_df$gender = as.factor(readmission_df$gender)
+readmission_df$race = as.factor(readmission_df$race)
+readmission_df$ethnicity = as.factor(readmission_df$ethnicity)
+readmission_df$age_range = as.factor(readmission_df$age_range)
+
+# Remove duplicated rows due to data extract formations
+readmission_df <- readmission_df %>% 
+  distinct(person_id, admit_date, .keep_all = TRUE)
+
+# Drop unnecessary columns
+readmission_df <- readmission_df[, c("gender", "race", "ethnicity", "DOB", "age", "age_range", "admit_date",
+                                       "discharge_date","readmission_date", "education", "confidence","assistance",
+                                       "understanding", "eight_day", "thirty_day", "ninety_day")]
+
+readmission_8_df <- readmission_df[, c("gender", "race", "ethnicity", "DOB", "age", "age_range", "admit_date",
+                                       "discharge_date","readmission_date", "education", "confidence","assistance", 
+                                       "understanding", "eight_day")]
+
+readmission_30_df <- readmission_df[, c("gender", "race", "ethnicity", "DOB", "age", "age_range", "admit_date",
+                                       "discharge_date","readmission_date", "education", "confidence","assistance", 
+                                       "understanding", "thirty_day")]
+
+readmission_90_df <- readmission_df[, c("gender", "race", "ethnicity", "DOB", "age", "age_range", "admit_date",
+                                       "discharge_date","readmission_date", "education", "confidence","assistance", 
+                                       "understanding", "ninety_day")]
+```
+
+Build the Case/Control sets
+```{r}
+# Current data doesn't support a 3:1 ratio. Must remain at a 2:1
+eight_readmission <- ccwc(entry = admit_date,
+                          exit = discharge_date,
+                          fail = eight_day,
+                          controls = 5,
+                          origin = 0,
+                          data = readmission_8_df,
+                          include = list(age, gender, race, ethnicity, education, confidence, assistance, understanding),
+                          match = age_range,
+                          silent = FALSE
+                          )
+
+thirty_readmission <- ccwc(entry = admit_date,
+                          exit = discharge_date,
+                          fail = thirty_day,
+                          controls = 5,
+                          origin = 0,
+                          data = readmission_30_df,
+                          include = list(age, gender, race, ethnicity, education, confidence, assistance, understanding),
+                          match = age_range,
+                          silent = FALSE
+                          )
+
+ninety_readmission <- ccwc(entry = admit_date,
+                          exit = discharge_date,
+                          fail = ninety_day,
+                          controls = 5,
+                          origin = 0,
+                          data = readmission_90_df,
+                          include = list(age, gender, race, ethnicity, education, confidence, assistance, understanding),
+                          match = age_range,
+                          silent = FALSE
+                          )
+```
+
+Review the descriptive statistics of the dataframe
+```{r}
+# Basic numbers and reviews of the dataframe
+summary(readmission_df)
+summary(eight_readmission)
+summary(thirty_readmission)
+summary(ninety_readmission)
+
+# Filter out the date fields as they have no relevance in this metric
+# Creating a breakdown by population for investigative purposes
+# describeBy(eight_readmission[,-1:-3], eight_readmission$Fail)
+# describeBy(thirty_readmission[,-1:-3], thirty_readmission$Fail)
+# describeBy(ninety_readmission[,-1:-3], ninety_readmission$Fail)
+```
+
+Perform a Student's T-Test on Age between patient groups
+```{r}
+## compare mean age by readmission group with a t-test
+t.test(age ~ Fail, data = eight_readmission)
+t.test(age ~ Fail, data = thirty_readmission)
+t.test(age ~ Fail, data = ninety_readmission)
+```
+
+Perform Chi Squared Test on Factors Individually
+```{r}
+# Eight Day Readmission
+chisq.test(x = readmission_8_df$gender, y = readmission_8_df$eight_day)
+chisq.test(x = readmission_8_df$race, y = readmission_8_df$eight_day)
+chisq.test(x = readmission_8_df$ethnicity, y = readmission_8_df$eight_day)
+chisq.test(x = readmission_8_df$education, y = readmission_8_df$eight_day)
+chisq.test(x = readmission_8_df$confidence, y = readmission_8_df$eight_day)
+chisq.test(x = readmission_8_df$assistance, y = readmission_8_df$eight_day)
+chisq.test(x = readmission_8_df$understanding, y = readmission_8_df$eight_day)
+
+# 30 Day Readmission
+chisq.test(x = readmission_30_df$gender, y = readmission_30_df$thirty_day)
+chisq.test(x = readmission_30_df$race, y = readmission_30_df$thirty_day)
+chisq.test(x = readmission_30_df$ethnicity, y = readmission_30_df$thirty_day)
+chisq.test(x = readmission_30_df$education, y = readmission_30_df$thirty_day)
+chisq.test(x = readmission_30_df$confidence, y = readmission_30_df$thirty_day)
+chisq.test(x = readmission_30_df$assistance, y = readmission_30_df$thirty_day)
+chisq.test(x = readmission_30_df$understanding, y = readmission_30_df$thirty_day)
+
+# 90 Day Readmission
+chisq.test(x = readmission_90_df$gender, y = readmission_90_df$ninety_day)
+chisq.test(x = readmission_90_df$race, y = readmission_90_df$ninety_day)
+chisq.test(x = readmission_90_df$ethnicity, y = readmission_90_df$ninety_day)
+chisq.test(x = readmission_90_df$education, y = readmission_90_df$ninety_day)
+chisq.test(x = readmission_90_df$confidence, y = readmission_90_df$ninety_day)
+chisq.test(x = readmission_90_df$assistance, y = readmission_90_df$ninety_day)
+chisq.test(x = readmission_90_df$understanding, y = readmission_90_df$ninety_day)
+```
+
+Calculate the Odds Ratios
+```{r}
+# Execute Odds Ratio for Full Dataframe
+education_all <- calcOddsRatio(df = readmission_df, category = education, readmission = thirty_day)
+confidence_all <- calcOddsRatio(df = readmission_df, category = confidence, readmission = thirty_day)
+assistance_all <- calcOddsRatio(df = readmission_df, category = assistance, readmission = thirty_day)
+understanding_all <- calcOddsRatio(df = readmission_df, category = understanding, readmission = thirty_day)
+
+# Execute Odds Ratio for Eight Day Readmission
+education_8 <- calcOddsRatio(df = eight_readmission, category = education, readmission = Fail)
+confidence_8 <- calcOddsRatio(df = eight_readmission, category = confidence, readmission = Fail)
+assistance_8 <- calcOddsRatio(df = eight_readmission, category = assistance, readmission = Fail)
+understanding_8 <- calcOddsRatio(df = eight_readmission, category = understanding, readmission = Fail)
+
+# Execute Odds Ratio for Thirty Day Readmission
+education_30 <- calcOddsRatio(df = thirty_readmission, category = education, readmission = Fail)
+confidence_30 <- calcOddsRatio(df = thirty_readmission, category = confidence, readmission = Fail)
+assistance_30 <- calcOddsRatio(df = thirty_readmission, category = assistance, readmission = Fail)
+understanding_30 <- calcOddsRatio(df = thirty_readmission, category = understanding, readmission = Fail)
+
+# Execute Odds Ratio for Ninety Day Readmission
+education_90 <- calcOddsRatio(df = ninety_readmission, category = education, readmission = Fail)
+confidence_90 <- calcOddsRatio(df = ninety_readmission, category = confidence, readmission = Fail)
+assistance_90 <- calcOddsRatio(df = ninety_readmission, category = assistance, readmission = Fail)
+understanding_90 <- calcOddsRatio(df = ninety_readmission, category = understanding, readmission = Fail)
+
+```
+
+```{r}
+# 8 day writing
+lapply(education_all, function(x) write.table(data.frame(x), 'education.csv', append= T, sep=',' ))
+lapply(confidence_all, function(x) write.table(data.frame(x), 'confidence.csv', append= T, sep=',' ))
+lapply(assistance_all, function(x) write.table(data.frame(x), 'assistnace.csv', append= T, sep=',' ))
+lapply(understanding_all, function(x) write.table(data.frame(x), 'understanding.csv', append= T, sep=',' ))
+
+# 8 day writing
+lapply(education_8, function(x) write.table(data.frame(x), 'education.csv', append= T, sep=',' ))
+lapply(confidence_8, function(x) write.table(data.frame(x), 'confidence.csv', append= T, sep=',' ))
+lapply(assistance_8, function(x) write.table(data.frame(x), 'assistnace.csv', append= T, sep=',' ))
+lapply(understanding_8, function(x) write.table(data.frame(x), 'understanding.csv', append= T, sep=',' ))
+
+# 30 day writing
+lapply(education_30, function(x) write.table(data.frame(x), 'education.csv', append= T, sep=',' ))
+lapply(confidence_30, function(x) write.table(data.frame(x), 'confidence.csv', append= T, sep=',' ))
+lapply(assistance_30, function(x) write.table(data.frame(x), 'assistnace.csv', append= T, sep=',' ))
+lapply(understanding_30, function(x) write.table(data.frame(x), 'understanding.csv', append= T, sep=',' ))
+
+# 90 day writing
+lapply(education_90, function(x) write.table(data.frame(x), 'education.csv', append= T, sep=',' ))
+lapply(confidence_90, function(x) write.table(data.frame(x), 'confidence.csv', append= T, sep=',' ))
+lapply(assistance_90, function(x) write.table(data.frame(x), 'assistnace.csv', append= T, sep=',' ))
+lapply(understanding_90, function(x) write.table(data.frame(x), 'understanding.csv', append= T, sep=',' ))
+
+```

@@ -1,0 +1,146 @@
+---
+title: 2 Readmission Processing
+output: html_notebook
+author: Bryan Sullivan
+---
+
+New segmentation for Visit extract
+```{r}
+# Load Libraries
+library(dplyr)
+library(lubridate)
+library(tidyr)
+
+# Remove Scientific Notation for browsing purposes
+options(scipen=999)
+
+# Read the data
+visit_df <- read.csv("visit.csv")
+visit_df <- visit_df[c("person_id", "visit_occurrence_id", "visit_start_date", "visit_end_date")]
+inpatient_df <- read.csv("inpatients_sample.csv")
+inpatient_df <- inpatient_df[c("person_id", "visit_occurrence_id", "visit_start_date", "visit_end_date")]
+
+# Enable dates as a Date type
+visit_df$visit_start_date <- as.Date(visit_df$visit_start_date)
+visit_df$visit_end_date <- as.Date(visit_df$visit_end_date)
+inpatient_df$visit_start_date <- as.Date(inpatient_df$visit_start_date)
+inpatient_df$visit_end_date <- as.Date(inpatient_df$visit_end_date)
+
+# Include an indicator that the visit_df are for surgical encounters
+visit_df$surgery <- 1
+
+# Join the visit and the inpatient dataframes
+total_visit_df <- merge(x = inpatient_df, y = visit_df, by = c("person_id", "visit_occurrence_id", "visit_start_date", "visit_end_date"), all = TRUE)
+
+# Sort dataframe for easier processing
+total_visit_df <- total_visit_df[order(total_visit_df$person_id, total_visit_df$visit_end_date),]
+
+# Create a readmission date column
+total_visit_df$readmission_date <- as.Date('')
+
+# Filter out visits before a surgery
+for (i in 1:nrow(total_visit_df)) {
+  discharge_date <- total_visit_df[i,4]
+  patient_id <- total_visit_df[i,1]
+
+  case_df <- total_visit_df[total_visit_df$person_id == patient_id, ]
+  case_df <- case_df[case_df$visit_start_date > discharge_date, ]
+  
+  if (nrow(case_df) > 0) {
+    total_visit_df[i,6] <- min(case_df$visit_start_date)
+  }
+}
+
+visit_df <- filter(total_visit_df, surgery == 1)
+visit_df$surgery <- NULL
+
+# Calculate the differences between the dates
+x <- interval(ymd(visit_df$visit_end_date),ymd(visit_df$readmission_date))
+visit_df$DayDiff <- x %/% days(1)
+visit_df$EightDay <- 0
+visit_df$ThirtyDay <- 0
+visit_df$NinetyDay <- 0
+visit_df$EightDay <- visit_df$DayDiff / 8
+visit_df$ThirtyDay <- visit_df$DayDiff / 30
+visit_df$NinetyDay <- visit_df$DayDiff / 90
+
+# Determine if the patient had a 8 day readmission
+visit_df$EightDay[visit_df$EightDay <= 1] <- 1
+visit_df$EightDay[visit_df$EightDay > 1 ] <- 0
+visit_df$EightDay[is.na(visit_df$EightDay)] <- 0
+
+# Determine if the patient had a 30 day readmission
+visit_df$ThirtyDay[visit_df$ThirtyDay <= 1] <- 1
+visit_df$ThirtyDay[visit_df$ThirtyDay > 1 ] <- 0
+visit_df$ThirtyDay[is.na(visit_df$ThirtyDay)] <- 0
+
+# Determine if the patient had a 90 day readmission
+visit_df$NinetyDay[visit_df$NinetyDay <= 1] <- 1
+visit_df$NinetyDay[visit_df$NinetyDay > 1 ] <- 0
+visit_df$NinetyDay[is.na(visit_df$NinetyDay)] <- 0
+
+# Clean up the dataframe
+readmission_df <- visit_df[,c("person_id", "visit_occurrence_id", "visit_start_date", 
+                                       "visit_end_date", "readmission_date", 
+                                       "EightDay", "ThirtyDay", "NinetyDay")]
+```
+
+
+
+```{r}
+##### ----- Create a Survey DataFrame ----- #####
+survey <- read.csv("survey.csv")
+
+#Filter out non-answers
+survey_df <- survey %>% filter(answer != 'PMI: Skip')
+survey_df <- survey_df %>% filter(answer != 'PMI: Prefer Not To Answer')
+
+#Clean up dataframe
+survey_df <- select(survey_df, c('person_id', 'question', 'answer'))
+
+#Rename the dataframe columns to match meaurement dataframe
+names(survey_df)[names(survey_df)=="person_id"] <- "PERSON_ID"
+names(survey_df)[names(survey_df)=="question"] <- "QUESTION"
+names(survey_df)[names(survey_df)=="answer"] <- "ANSWER"
+
+#Expand the dataframe to allow for a supervised machine learning algorithm
+survey_wider <- survey_df %>%
+  pivot_wider(names_from = QUESTION, values_from = ANSWER)
+
+#Rename the columns
+names(survey_wider) <- c('person_id', 'education', 'confidence', 'assistance', 'understanding')
+names(readmission_df) <- c('person_id', 'visit_id', 'admit_date', 'discharge_date',
+                        'readmission_date', 'eight_day', 'thirty_day', 'ninety_day')
+
+#Convert answers to factors for processing in ML model
+survey_wider$education <- as.factor(survey_wider$education)
+survey_wider$confidence <- as.factor(survey_wider$confidence)
+survey_wider$assistance <- as.factor(survey_wider$assistance)
+survey_wider$understanding <- as.factor(survey_wider$understanding)
+
+##### ----- Join Person/Survey/Readmission DataFrame ----- #####
+readmission_survey_df <- merge(x = survey_wider, y = readmission_df, by = "person_id" , all.y = TRUE)
+
+person <- read.csv("person.csv")
+person_df <- select(person, c('PERSON_ID', 'GENDER', 'RACE', 'ETHNICITY', 'SEX_AT_BIRTH', 'DATE_OF_BIRTH'))
+names(person_df) <- c('person_id', 'gender', 'race', 'ethnicity', 'sex_at_birth', 'DOB')
+person_readmission_survey_df <- merge(x = readmission_survey_df, y = person_df, by = "person_id", all.x = TRUE)
+
+person_readmission_survey_df <- person_readmission_survey_df %>%
+   group_by(person_id) %>%
+   arrange(visit_id) %>%
+   slice(-n())
+
+# Calculate age at admission
+person_readmission_survey_df$age <- trunc((person_readmission_survey_df$DOB %--% person_readmission_survey_df$admit_date) / years(1))
+
+# Clean up dataframe
+dataset <- person_readmission_survey_df[, c("person_id", "gender", "sex_at_birth", "race", "ethnicity",
+                                            "DOB", "admit_date", "discharge_date", "readmission_date", "age", "visit_id",
+                                            "education", "confidence", "assistance", "understanding", "eight_day", "thirty_day",
+                                            "ninety_day")]
+
+write.csv(dataset,"dataset.csv", row.names=FALSE)
+```
+
+
